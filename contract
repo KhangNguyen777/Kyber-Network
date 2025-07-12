@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+interface ISwapRouter {
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24 fee;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    function exactInputSingle(ExactInputSingleParams calldata params)
+        external
+        payable
+        returns (uint256 amountOut);
+}
+
+interface IWETH is IERC20 {
+    function deposit() external payable;
+    function withdraw(uint256 wad) external;
+}
+
+contract KyberLiteAggregator is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
+    IWETH public immutable WETH;
+    ISwapRouter public immutable swapRouter;
+
+    event Swapped(
+        address indexed tokenIn,
+        address indexed tokenOut,
+        uint256 amountIn,
+        uint256 amountOut
+    );
+
+    constructor(address _wethAddress, address _swapRouterAddress) {
+        WETH = IWETH(_wethAddress);
+        swapRouter = ISwapRouter(_swapRouterAddress);
+    }
+
+    function swap(ISwapRouter.ExactInputSingleParams calldata params)
+        external
+        payable
+        nonReentrant
+        returns (uint256 amountOut)
+    {
+        if (msg.value > 0) {
+            require(params.tokenIn == address(WETH), "KyberLite: Invalid tokenIn for ETH swap");
+            WETH.deposit{value: msg.value}();
+            require(WETH.balanceOf(address(this)) >= params.amountIn, "KyberLite: Insufficient WETH");
+        } else {
+            IERC20(params.tokenIn).safeTransferFrom(
+                msg.sender,
+                address(this),
+                params.amountIn
+            );
+        }
+
+        IERC20(params.tokenIn).safeApprove(address(swapRouter), params.amountIn);
+        
+        amountOut = swapRouter.exactInputSingle(params);
+
+        require(amountOut >= params.amountOutMinimum, "KyberLite: Slippage too high");
+
+        if (params.tokenOut == address(WETH) && params.recipient == msg.sender) {
+            WETH.withdraw(amountOut);
+            payable(params.recipient).transfer(amountOut);
+        } else {
+            IERC20(params.tokenOut).safeTransfer(params.recipient, amountOut);
+        }
+
+        emit Swapped(params.tokenIn, params.tokenOut, params.amountIn, amountOut);
+    }
+    
+    receive() external payable {}
+}
